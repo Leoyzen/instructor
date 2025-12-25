@@ -1,6 +1,6 @@
 import json
 import sys
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from collections.abc import Iterable
 from collections.abc import Iterable as ABCIterable
 from dataclasses import dataclass
@@ -357,6 +357,148 @@ class ParallelBase:
             yield self.registry[name].model_validate_json(
                 arguments, context=validation_context, strict=strict
             )
+
+    def from_streaming_response(
+        self,
+        completion: Iterable[Any],
+        mode: Mode,
+        validation_context: Optional[dict[str, Any]] = None,
+        strict: Optional[bool] = None,
+    ) -> Generator[ParallelResult, None, None]:
+        """
+        Process streaming parallel tool calls (synchronous).
+
+        Yields ParallelResult objects as each tool call delta arrives,
+        providing real-time access to partial and completed models.
+
+        Args:
+            completion: Streaming response from LLM API (iterable of chunks)
+            mode: The Mode for this parallel operation (e.g., Mode.PARALLEL_TOOLS)
+            validation_context: Optional context dictionary for Pydantic validation
+            strict: Optional strict JSON parsing mode
+
+        Yields:
+            ParallelResult containing the current state of all tool calls,
+            including both completed and partial models
+
+        Example:
+            >>> parallel_base = ParallelBase(User, Task, Organization)
+            >>> for result in parallel_base.from_streaming_response(
+            ...     stream,
+            ...     mode=Mode.PARALLEL_TOOLS
+            ... ):
+            ...     print(f"Completed: {len(result.completed)}")
+            ...     print(f"Partial: {len(result.partial)}")
+            ...     for model in result.get_all_models():
+            ...         print(model)
+        """
+        # Initialize ParallelStreamHelper to track streaming state
+        helper = ParallelStreamHelper(self)
+
+        # Process each chunk from the streaming response
+        for chunk in completion:
+            # Extract tool call deltas from this chunk
+            deltas = self._extract_tool_deltas(chunk, mode)
+
+            # Process each delta and yield results
+            for delta in deltas:
+                yield helper.process_delta(
+                    delta,
+                    validation_context=validation_context,
+                    strict=strict,
+                )
+
+    async def from_streaming_response_async(
+        self,
+        completion: AsyncGenerator[Any, None],
+        mode: Mode,
+        validation_context: Optional[dict[str, Any]] = None,
+        strict: Optional[bool] = None,
+    ) -> AsyncGenerator[ParallelResult, None]:
+        """
+        Process streaming parallel tool calls (asynchronous).
+
+        Async version of from_streaming_response for async clients.
+        Yields ParallelResult objects as each tool call delta arrives.
+
+        Args:
+            completion: Async streaming response from LLM API
+            mode: The Mode for this parallel operation (e.g., Mode.PARALLEL_TOOLS)
+            validation_context: Optional context dictionary for Pydantic validation
+            strict: Optional strict JSON parsing mode
+
+        Yields:
+            AsyncGenerator of ParallelResult containing the current state
+            of all tool calls (both completed and partial)
+
+        Example:
+            >>> parallel_base = ParallelBase(User, Task, Organization)
+            >>> async for result in parallel_base.from_streaming_response_async(
+            ...     stream,
+            ...     mode=Mode.PARALLEL_TOOLS
+            ... ):
+            ...     print(f"Completed: {len(result.completed)}")
+            ...     for model in result.get_all_models():
+            ...         print(model)
+        """
+        # Initialize ParallelStreamHelper to track streaming state
+        helper = ParallelStreamHelper(self)
+
+        # Process each chunk from the async streaming response
+        async for chunk in completion:
+            # Extract tool call deltas from this chunk
+            deltas = self._extract_tool_deltas(chunk, mode)
+
+            # Process each delta and yield results
+            for delta in deltas:
+                yield helper.process_delta(
+                    delta,
+                    validation_context=validation_context,
+                    strict=strict,
+                )
+
+    @staticmethod
+    def _extract_tool_deltas(
+        chunk: Any,  # noqa: ARG004
+        mode: Mode,  # noqa: ARG004
+    ) -> list[ToolCallDelta]:
+        """
+        Extract tool call deltas from a streaming chunk.
+
+        This is a base implementation that should be overridden by provider-specific
+        subclasses (e.g., OpenAI, Anthropic, VertexAI). Each provider has a different
+        structure for streaming responses that requires specific handling.
+
+        Args:
+            chunk: A single chunk from the streaming response
+            mode: The Mode indicating the provider and streaming format
+
+        Returns:
+            A list of ToolCallDelta objects extracted from this chunk.
+            May be empty if this chunk contains no tool call deltas.
+
+        Raises:
+            NotImplementedError: If not overridden by a provider-specific subclass
+
+        Example:
+            # OpenAI implementation (should be in provider-specific subclass)
+            @staticmethod
+            def _extract_tool_deltas(chunk, mode):
+                if mode == Mode.PARALLEL_TOOLS:
+                    deltas = []
+                    if chunk.choices and chunk.choices[0].delta.tool_calls:
+                        for tc in chunk.choices[0].delta.tool_calls:
+                            deltas.append(ToolCallDelta(
+                                id=tc.id,
+                                index=tc.index,
+                                name=tc.function.name if tc.function else None,
+                                arguments=tc.function.arguments or "",
+                            ))
+                    return deltas
+                return []
+        """
+        # Base implementation - should be overridden by provider-specific classes
+        return []
 
 
 class VertexAIParallelBase(ParallelBase):
