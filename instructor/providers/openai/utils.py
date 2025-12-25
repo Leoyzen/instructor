@@ -13,10 +13,9 @@ from typing import Any, cast
 from openai import pydantic_function_tool
 
 from ...dsl.parallel import ParallelModel, handle_parallel_model
-from ...core.exceptions import ConfigurationError
 from ...mode import Mode
-from ...utils.core import dump_message, merge_consecutive_messages
 from ...processing.schema import generate_openai_schema
+from ...utils.core import dump_message, merge_consecutive_messages
 
 
 def reask_tools(
@@ -138,8 +137,8 @@ def handle_parallel_tools(
 
     This mode enables making multiple independent function calls in a single request,
     useful for batch processing or when you need to extract multiple structured outputs
-    simultaneously. The response_model should be a list/iterable type or use the
-    ParallelModel wrapper.
+    simultaneously. The response_model should be a list/iterable type or use's
+    the ParallelModel wrapper. Streaming is now supported for real-time results.
 
     Example usage:
         # Define models for parallel extraction
@@ -162,12 +161,12 @@ def handle_parallel_tools(
     Kwargs modifications:
     - Adds: "tools" (multiple function schemas from parallel model)
     - Adds: "tool_choice" ("auto" to allow model to choose which tools to call)
-    - Validates: stream=False (streaming not supported in parallel mode)
+    - Supports: stream=True (streaming now supported for parallel mode)
+
+    Note:
+        When stream=True, the response will be a generator yielding ParallelResult
+        objects containing partial and completed models for each parallel tool call.
     """
-    if new_kwargs.get("stream", False):
-        raise ConfigurationError(
-            "stream=True is not supported when using PARALLEL_TOOLS mode"
-        )
     new_kwargs["tools"] = handle_parallel_model(response_model)
     new_kwargs["tool_choice"] = "auto"
     return cast(type[Any], ParallelModel(typehint=response_model)), new_kwargs

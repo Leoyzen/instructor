@@ -1,31 +1,30 @@
 from __future__ import annotations
 
-import openai
 import inspect
+from collections.abc import AsyncGenerator, Awaitable, Generator, Iterable
 from functools import partial
-import instructor
-from ..utils.providers import Provider, get_provider
-from openai.types.chat import ChatCompletionMessageParam
 from typing import (
-    TypeVar,
-    Callable,
-    overload,
-    Union,
-    Literal,
     Any,
-    get_origin,
+    Callable,
+    Literal,
+    TypeVar,
+    Union,
     get_args,
+    get_origin,
+    overload,
 )
-from tenacity import (
-    AsyncRetrying,
-    Retrying,
-)
-from collections.abc import Generator, Iterable, Awaitable, AsyncGenerator
-from typing_extensions import Self
-from pydantic import BaseModel
-from ..dsl.partial import Partial
-from .hooks import Hooks, HookName
 
+import openai
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel
+from tenacity import AsyncRetrying, Retrying
+from typing_extensions import Self
+
+import instructor
+
+from ..dsl.partial import Partial
+from ..utils.providers import Provider, get_provider
+from .hooks import HookName, Hooks
 
 T = TypeVar("T", bound=Union[BaseModel, "Iterable[Any]", "Partial[Any]"])
 
@@ -643,6 +642,33 @@ class AsyncInstructor(Instructor):
                 context=context,
                 strict=strict,
                 hooks=hooks,  # Pass the per-call hooks to create_iterable
+                **kwargs,
+            )
+
+        # Import at runtime to avoid circular import
+        from ..dsl.parallel import ParallelBase
+
+        # Check if response_model is a ParallelBase instance in parallel mode
+        if (
+            isinstance(response_model, ParallelBase)
+            and self.mode
+            in {
+                instructor.Mode.PARALLEL_TOOLS,
+                instructor.Mode.VERTEXAI_PARALLEL_TOOLS,
+                instructor.Mode.ANTHROPIC_PARALLEL_TOOLS,
+            }
+            and kwargs.get("stream", False)
+        ):
+            # ParallelBase instance with stream=True is already handled by
+            # process_response_async which calls from_streaming_response_async
+            return await self.create_fn(
+                response_model=response_model,
+                validation_context=validation_context,
+                context=context,
+                max_retries=max_retries,
+                messages=messages,
+                strict=strict,
+                hooks=combined_hooks,
                 **kwargs,
             )
 

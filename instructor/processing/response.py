@@ -37,14 +37,14 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, TypeVar, TYPE_CHECKING, cast
 from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from openai.types.chat import ChatCompletion
 from pydantic import BaseModel
 from typing_extensions import ParamSpec
 
-from instructor.core.exceptions import InstructorError, ConfigurationError
+from instructor.core.exceptions import ConfigurationError, InstructorError
 
 from ..dsl.iterable import IterableBase
 from ..dsl.parallel import ParallelBase
@@ -53,9 +53,8 @@ from ..dsl.simple_type import AdapterBase
 
 if TYPE_CHECKING:
     from .function_calls import OpenAISchema
+
 from ..mode import Mode
-from .multimodal import convert_messages
-from ..utils.core import prepare_response_model
 
 # Anthropic utils
 from ..providers.anthropic.utils import (
@@ -140,10 +139,7 @@ from ..providers.openai.utils import (
 )
 
 # Perplexity utils
-from ..providers.perplexity.utils import (
-    handle_perplexity_json,
-    reask_perplexity_json,
-)
+from ..providers.perplexity.utils import handle_perplexity_json, reask_perplexity_json
 
 # Writer utils
 from ..providers.writer.utils import (
@@ -160,6 +156,8 @@ from ..providers.xai.utils import (
     reask_xai_json,
     reask_xai_tools,
 )
+from ..utils.core import prepare_response_model
+from .multimodal import convert_messages
 
 logger = logging.getLogger("instructor")
 
@@ -235,6 +233,16 @@ async def process_response_async(
         return response_model.from_streaming_response_async(  # type: ignore[return-value]
             cast(AsyncGenerator[Any, None], response),  # type: ignore[arg-type]
             mode=mode,
+        )
+
+    # Handle parallel streaming for ParallelBase instances
+    if isinstance(response_model, ParallelBase) and stream:
+        # from_streaming_response_async returns an AsyncGenerator that yields ParallelResult objects
+        return response_model.from_streaming_response_async(  # type: ignore[return-value]
+            cast(AsyncGenerator[Any, None], response),  # type: ignore[arg-type]
+            mode=mode,
+            validation_context=validation_context,
+            strict=strict,
         )
 
     model = response_model.from_response(  # type: ignore
@@ -341,6 +349,16 @@ def process_response(
             )
         )
         return tasks
+
+    # Handle parallel streaming for ParallelBase instances
+    if isinstance(response_model, ParallelBase) and stream:
+        # from_streaming_response returns a Generator that yields ParallelResult objects
+        return response_model.from_streaming_response(  # type: ignore[return-value]
+            response,
+            mode=mode,
+            validation_context=validation_context,
+            strict=strict,
+        )
 
     model = response_model.from_response(  # type: ignore
         response,
