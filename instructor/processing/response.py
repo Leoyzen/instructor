@@ -37,8 +37,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from collections.abc import AsyncGenerator, Iterable
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_origin
 
 from openai.types.chat import ChatCompletion
 from pydantic import BaseModel
@@ -176,20 +176,25 @@ async def process_response_async(
     strict: bool | None = None,
     mode: Mode = Mode.TOOLS,
 ) -> T_Model | ChatCompletion:
-    """Asynchronously process and transform LLM responses into structured models.
+    """
+    Process and transform LLM responses into structured models (asynchronous).
 
     This function is the async entry point for converting raw LLM responses into validated
     Pydantic models. It handles various response formats from different providers and
     supports special response types like streaming, partial objects, and parallel tool calls.
 
     Args:
-        response (ChatCompletion or Similar API Response): The raw response from the LLM API. Despite the type hint,
+        response (ChatCompletion or Similar API Response): The raw response from LLM API. Despite the type hint,
             this can be responses from any supported provider (OpenAI, Anthropic, Google, etc.)
         response_model (type[T_Model | BaseModel] | None): The target Pydantic
             model to parse the response into. If None, returns the raw response unchanged.
             Can also be special DSL types like ParallelBase for parallel tool calls, or IterableBase and PartialBase for streaming.
+            For parallel modes (PARALLEL_TOOLS, VERTEXAI_PARALLEL_TOOLS, ANTHROPIC_PARALLEL_TOOLS),
+            when stream=True is used with Iterable[Union[ModelA, ModelB, ...]], it is automatically
+            converted to a appropriate ParallelBase instance for streaming - no manual ParallelBase creation required.
         stream (bool): Whether this is a streaming response. Required for proper handling
-            of IterableBase and PartialBase models. Defaults to False.
+            of IterableBase and PartialBase models. For parallel modes, enables transparent streaming
+            when used with Iterable[Union[...]] types. Defaults to False.
         validation_context (dict[str, Any] | None): Additional context passed to Pydantic
             validators during model validation. Useful for dynamic validation logic. The context
             is also used to format templated responses. Defaults to None.
@@ -204,21 +209,25 @@ async def process_response_async(
             - If response_model is None: returns raw response unchanged
             - If response_model is IterableBase with stream=True: returns list of models
             - If response_model is AdapterBase: returns the adapted content
+            - If response_model is ParallelBase with stream=True: returns AsyncGenerator yielding ParallelResult
             - Otherwise: returns instance of response_model with _raw_response attached
 
     Raises:
         ValidationError: If the response doesn't match the expected model schema
         IncompleteOutputException: If the response was truncated due to token limits
         ValueError: If an invalid mode is specified
+        JSONDecodeError: Malformed JSON in response (for JSON modes)
 
     Note:
         The function automatically detects special response model types (Iterable, Partial,
         Parallel, Adapter) and applies appropriate processing logic for each.
+        For parallel modes with streaming, Iterable[Union[...]] types are automatically
+        converted to ParallelBase instances, requiring only stream=True from the user.
     """
-
     logger.debug(
         f"Instructor Raw Response: {response}",
     )
+
     if response_model is None:
         return response
 
@@ -279,7 +288,8 @@ def process_response(
     strict=None,
     mode: Mode = Mode.TOOLS,
 ) -> T_Model | list[T_Model] | None:
-    """Process and transform LLM responses into structured models (synchronous).
+    """
+    Process and transform LLM responses into structured models (synchronous).
 
     This is the main entry point for converting raw LLM responses into validated Pydantic
     models. It acts as a dispatcher that handles various response formats from 40+ different
@@ -295,8 +305,12 @@ def process_response(
             - ParallelBase: For parallel tool/function calls
             - AdapterBase: For simple type adaptations (e.g., str, int)
             If None, returns the raw response unchanged.
+            For parallel modes (PARALLEL_TOOLS, VERTEXAI_PARALLEL_TOOLS, ANTHROPIC_PARALLEL_TOOLS),
+            when stream=True, Iterable[Union[ModelA, ModelB, ...]] is automatically converted
+            to a appropriate ParallelBase instance - no manual ParallelBase creation required.
         stream (bool): Whether this is a streaming response. Required to be True for
-            proper handling of IterableBase and PartialBase models.
+            proper handling of IterableBase and PartialBase models. For parallel modes, enables
+            transparent streaming when used with Iterable[Union[...]] types.
         validation_context (dict[str, Any] | None): Additional context passed to Pydantic
             validators. Useful for runtime validation logic based on external state.
         strict (bool | None): Controls JSON parsing strictness:
@@ -313,6 +327,7 @@ def process_response(
             - If response_model is None: Original response unchanged
             - If IterableBase: List of extracted model instances
             - If ParallelBase: Special parallel response object
+            - If ParallelBase with stream=True: Generator yielding ParallelResult objects
             - If AdapterBase: The adapted simple type (str, int, etc.)
             - Otherwise: Single instance of response_model with _raw_response attached
 
@@ -326,6 +341,8 @@ def process_response(
         The function preserves the raw response by attaching it to the parsed model
         as `_raw_response`. This allows access to metadata like token usage, model
         info, and other provider-specific fields after parsing.
+        For parallel modes with streaming, Iterable[Union[...]] types are automatically
+        handled when stream=True is specified, providing transparent streaming support.
     """
     logger.debug(
         f"Instructor Raw Response: {response}",
@@ -398,13 +415,20 @@ def handle_response_model(
 ) -> tuple[type[T] | None, dict[str, Any]]:
     """
     Handles the response model based on the specified mode and prepares the kwargs for the API call.
+
+    This function provides transparent streaming support for parallel tool modes. When stream=True is used
+    with PARALLEL_MODES (PARALLEL_TOOLS, VERTEXAI_PARALLEL_TOOLS, ANTHROPIC_PARALLEL_TOOLS),
+    it automatically converts Iterable[Union[Model1, Model2, ...]] types to the appropriate
+    ParallelBase instance for streaming. Users only need to add stream=True without manually
+    creating ParallelBase instances.
+
     This really should be named 'prepare_create_kwargs' as its job is to map the openai create kwargs
     to the correct format for the API call based on the mode.
 
     Args:
         response_model (type[T] | None): The response model to be used for parsing the API response.
         mode (Mode): The mode to use for handling the response model. Defaults to Mode.TOOLS.
-        **kwargs: Additional keyword arguments to be passed to the API call.
+        **kwargs: Additional keyword arguments to be passed to the API call. Can include 'stream' to enable streaming.
 
     Returns:
         tuple[type[T] | None, dict[str, Any]]: A tuple containing the processed response model and the updated kwargs.
@@ -412,6 +436,10 @@ def handle_response_model(
     This function prepares the response model and modifies the kwargs based on the specified mode.
     It handles various modes like TOOLS, JSON, FUNCTIONS, etc., and applies the appropriate
     transformations to the response model and kwargs.
+
+    Streaming Behavior:
+        - Parallel modes with stream=True: Auto-converts Iterable[Union[...]] to ParallelBase instance
+        - Non-streaming or already ParallelBase instance: Uses original behavior
     """
 
     new_kwargs = kwargs.copy()
@@ -425,7 +453,45 @@ def handle_response_model(
     }
 
     if mode in PARALLEL_MODES:
-        response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore
+        # Auto-detect and convert for streaming parallel mode
+        # Enable transparent streaming: user just needs to add stream=True
+        is_streaming = new_kwargs.get("stream", False)
+
+        if is_streaming:
+            # For streaming, ensure response_model is a ParallelBase instance
+            from ..dsl.parallel import ParallelBase
+
+            if not isinstance(response_model, ParallelBase):
+                # Check if it's Iterable[Union[...]] type
+                is_iterable_type = (
+                    isinstance(response_model, type)
+                    and get_origin(response_model) is Iterable
+                )
+
+                if is_iterable_type:
+                    # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
+                    from ..dsl.parallel import (
+                        AnthropicParallelModel,
+                        OpenAIParallelModel,
+                        VertexAIParallelModel,
+                    )
+
+                    # Create appropriate ParallelBase instance based on mode
+                    if mode == Mode.PARALLEL_TOOLS:
+                        response_model = OpenAIParallelModel(response_model)  # type: ignore[arg-type]
+                    elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
+                        response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
+                    elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
+                        response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
+                    # Other providers can be added here in future
+
+            # For streaming mode, only process kwargs to set up tools/tool_choice
+            # response_model is already a ParallelBase instance (either user-provided or auto-created)
+            _, new_kwargs = PARALLEL_MODES[mode](None, new_kwargs)  # type: ignore
+        else:
+            # Non-streaming mode: use original logic
+            response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore
+
         logger.debug(
             f"Instructor Request: {mode.value=}, {response_model=}, {new_kwargs=}",
             extra={
