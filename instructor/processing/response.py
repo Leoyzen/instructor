@@ -472,13 +472,15 @@ def handle_response_model(
                     # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
                     from ..dsl.parallel import (
                         AnthropicParallelModel,
-                        OpenAIParallelModel,
+                        LiteLLMParallelModel,
                         VertexAIParallelModel,
                     )
 
                     # Create appropriate ParallelBase instance based on mode
                     if mode == Mode.PARALLEL_TOOLS:
-                        response_model = OpenAIParallelModel(response_model)  # type: ignore[arg-type]
+                        # Use LiteLLMParallelModel for PARALLEL_TOOLS mode (supports LiteLLM's unified interface)
+                        # OpenAIParallelModel is also compatible but LiteLLMParallelModel is optimized for LiteLLM
+                        response_model = LiteLLMParallelModel(response_model)  # type: ignore[arg-type]
                     elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
                         response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
                     elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
@@ -487,10 +489,11 @@ def handle_response_model(
 
             # For streaming mode, only process kwargs to set up tools/tool_choice
             # response_model is already a ParallelBase instance (either user-provided or auto-created)
-            _, new_kwargs = PARALLEL_MODES[mode](None, new_kwargs)  # type: ignore
+            response_model_for_kwargs = response_model if isinstance(response_model, ParallelBase) else None
+            _, new_kwargs = PARALLEL_MODES[mode](response_model_for_kwargs, new_kwargs)  # type: ignore[arg-type,return-value]
         else:
             # Non-streaming mode: use original logic
-            response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore
+            response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore[arg-type,return-value]
 
         logger.debug(
             f"Instructor Request: {mode.value=}, {response_model=}, {new_kwargs=}",

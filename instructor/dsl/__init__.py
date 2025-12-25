@@ -5,6 +5,8 @@ from .maybe import Maybe
 from .parallel import (
     AnthropicParallelBase,
     AnthropicParallelModel,
+    LiteLLMParallelBase,
+    LiteLLMParallelModel,
     OpenAIParallelBase,
     OpenAIParallelModel,
     ParallelBase,
@@ -31,6 +33,8 @@ __all__ = [  # noqa: F405
     "ParallelModel",
     "AnthropicParallelBase",
     "AnthropicParallelModel",
+    "LiteLLMParallelBase",
+    "LiteLLMParallelModel",
     "VertexAIParallelBase",
     "VertexAIParallelModel",
     "ParallelResult",

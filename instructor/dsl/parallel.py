@@ -740,6 +740,150 @@ def AnthropicParallelModel(typehint: type[Iterable]) -> AnthropicParallelBase:
     return AnthropicParallelBase(*[model for model in the_types])
 
 
+class LiteLLMParallelBase(ParallelBase):
+    """
+    ParallelBase subclass for LiteLLM provider with streaming support.
+
+    This class extends ParallelBase to handle LiteLLM's unified streaming
+    format for parallel tool calls. LiteLLM provides a unified interface
+    for multiple providers (OpenAI, Anthropic, VertexAI, Groq, etc.),
+    and this class extracts tool call deltas from LiteLLM's streaming responses.
+
+    LiteLLM uses an OpenAI-compatible format for streaming responses, making
+    it compatible with most providers that support tool calls.
+
+    Example:
+        >>> from pydantic import BaseModel
+        >>> class User(BaseModel):
+        ...     name: str
+        >>> class Task(BaseModel):
+        ...     title: str
+        >>> parallel_base = LiteLLMParallelBase(User, Task)
+        >>> for result in parallel_base.from_streaming_response(
+        ...     stream, mode=Mode.PARALLEL_TOOLS
+        ... ):
+        ...     print(result)
+    """
+
+    @staticmethod
+    def _extract_tool_deltas(
+        chunk: Any,
+        mode: Mode,
+    ) -> list[ToolCallDelta]:
+        """
+        Extract tool call deltas from LiteLLM streaming chunk.
+
+        This method processes LiteLLM's streaming response format, which provides
+        a unified OpenAI-compatible interface for multiple LLM providers.
+        LiteLLM normalizes responses from various providers (OpenAI, Anthropic,
+        VertexAI, Groq, Together, etc.) into a consistent format.
+
+        The expected structure is:
+            - chunk.choices[0].delta.tool_calls: List of tool call deltas
+            - Each tool call has:
+                - id: Tool call identifier (may be None in early chunks)
+                - index: Position in the parallel tool call list
+                - function.name: Function name (may be None in early chunks)
+                - function.arguments: Partial arguments string
+
+        Args:
+            chunk: A single streaming chunk from LiteLLM's completion API.
+                LiteLLM normalizes provider responses to an OpenAI-compatible format.
+            mode: The Mode for this parallel operation. Only processes
+                chunks when mode is Mode.PARALLEL_TOOLS.
+
+        Returns:
+            A list of ToolCallDelta objects extracted from this chunk.
+            Returns an empty list if:
+            - mode is not PARALLEL_TOOLS
+            - chunk has no choices
+            - chunk has no tool_calls in delta
+            - tool_calls is empty
+
+        Note:
+            LiteLLM provides a unified interface for multiple providers:
+            - OpenAI models (gpt-4, gpt-3.5-turbo, etc.)
+            - Anthropic models (claude-3-opus, claude-3-sonnet, etc.)
+            - VertexAI models (gemini-pro, gemini-1.5-pro, etc.)
+            - Groq models (llama3-70b, mixtral-8x7b, etc.)
+            - Together AI, Fireworks, Replicate, and many more
+
+            All these providers return responses in the LiteLLM-normalized format,
+            making this implementation compatible with all LiteLLM-supported providers.
+
+        Example:
+            >>> # Simulate a LiteLLM streaming chunk
+            >>> chunk = type('Chunk', (), {
+            ...     'choices': [type('Choice', (), {
+            ...         'delta': type('Delta', (), {
+            ...             'tool_calls': [
+            ...                 type('ToolCall', (), {
+            ...                     'id': 'call_123',
+            ...                     'index': 0,
+            ...                     'function': type('Function', (), {
+            ...                         'name': 'User',
+            ...                         'arguments': '{"name": "Alice"'
+            ...                     })()
+            ...                 })()
+            ...             ]
+            ...         })()]
+            ...     })()
+            >>> deltas = LiteLLMParallelBase._extract_tool_deltas(
+            ...     chunk, Mode.PARALLEL_TOOLS
+            ... )
+            >>> len(deltas)
+            1
+            >>> deltas[0].id
+            'call_123'
+        """
+        # Only process LiteLLM PARALLEL_TOOLS mode
+        if mode != Mode.PARALLEL_TOOLS:
+            return []
+
+        # Validate chunk structure - LiteLLM uses OpenAI-compatible format
+        if not chunk or not hasattr(chunk, "choices") or not chunk.choices:
+            return []
+
+        # Get the first choice's delta
+        delta = chunk.choices[0].delta
+        if not delta:
+            return []
+
+        # Check for tool_calls
+        if not hasattr(delta, "tool_calls") or not delta.tool_calls:
+            return []
+
+        # Extract deltas from each tool_call
+        deltas = []
+        for tc in delta.tool_calls:
+            # Safe attribute access with fallbacks
+            tool_call_id = getattr(tc, "id", None)
+            index = getattr(tc, "index", 0)
+
+            # Extract function info if available
+            # LiteLLM normalizes this across all providers
+            function = getattr(tc, "function", None)
+            if function:
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", "") or ""
+            else:
+                # Some providers might use 'name' directly on tool_call
+                name = getattr(tc, "name", None)
+                arguments = ""
+
+            # Create ToolCallDelta
+            deltas.append(
+                ToolCallDelta(
+                    id=tool_call_id,
+                    index=index,
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+
+        return deltas
+
+
 def OpenAIParallelModel(typehint: type[Iterable]) -> OpenAIParallelBase:
     """
     Create an OpenAI-specific parallel model from a type hint.
@@ -764,3 +908,38 @@ def OpenAIParallelModel(typehint: type[Iterable]) -> OpenAIParallelBase:
     """
     the_types = get_types_array(typehint)
     return OpenAIParallelBase(*[model for model in the_types])
+
+
+def LiteLLMParallelModel(typehint: type[Iterable]) -> LiteLLMParallelBase:
+    """
+    Create a LiteLLM-specific parallel model from a type hint.
+
+    Wraps models from the type hint into a LiteLLMParallelBase instance
+    configured for LiteLLM's unified streaming format.
+
+    LiteLLM provides a unified interface for multiple LLM providers,
+    and this factory creates a parallel model that works with all
+    LiteLLM-supported providers (OpenAI, Anthropic, VertexAI, Groq, etc.).
+
+    Args:
+        typehint: A type hint of form Iterable[Union[ModelA, ModelB, ...]]
+
+    Returns:
+        A LiteLLMParallelBase instance configured with the extracted models
+
+    Example:
+        >>> from typing import Union
+        >>> from collections.abc import Iterable
+        >>> class User(BaseModel):
+        ...     name: str
+        >>> class Task(BaseModel):
+        ...     title: str
+        >>> parallel = LiteLLMParallelModel(Iterable[Union[User, Task]])
+
+    Note:
+        LiteLLM automatically normalizes responses from different providers
+        into a consistent OpenAI-compatible format, so LiteLLMParallelBase
+        works seamlessly with all LiteLLM-supported providers.
+    """
+    the_types = get_types_array(typehint)
+    return LiteLLMParallelBase(*[model for model in the_types])
