@@ -593,6 +593,122 @@ def VertexAIParallelModel(typehint: type[Iterable]) -> VertexAIParallelBase:
     return VertexAIParallelBase(*[model for model in the_types])
 
 
+class OpenAIParallelBase(ParallelBase):
+    """
+    ParallelBase subclass for OpenAI provider with streaming support.
+
+    This class extends ParallelBase to handle OpenAI's specific streaming
+    format for parallel tool calls. It extracts tool call deltas from
+    OpenAI's ChatCompletionChunk objects.
+
+    Example:
+        >>> from pydantic import BaseModel
+        >>> class User(BaseModel):
+        ...     name: str
+        >>> class Task(BaseModel):
+        ...     title: str
+        >>> parallel_base = OpenAIParallelBase(User, Task)
+        >>> for result in parallel_base.from_streaming_response(
+        ...     stream, mode=Mode.PARALLEL_TOOLS
+        ... ):
+        ...     print(result)
+    """
+
+    @staticmethod
+    def _extract_tool_deltas(
+        chunk: Any,
+        mode: Mode,
+    ) -> list[ToolCallDelta]:
+        """
+        Extract tool call deltas from OpenAI ChatCompletionChunk.
+
+        This method processes OpenAI's streaming response format, extracting
+        tool call information from the delta.tool_calls field of each chunk.
+        OpenAI streams tool call data incrementally across multiple chunks,
+        so each chunk may contain partial updates to one or more tool calls.
+
+        Args:
+            chunk: A single ChatCompletionChunk from OpenAI's streaming API.
+                Expected structure:
+                - chunk.choices[0].delta.tool_calls: List of tool call deltas
+                - Each tool call has:
+                    - id: Tool call identifier (may be None in early chunks)
+                    - index: Position in the parallel tool call list
+                    - function.name: Function name (may be None in early chunks)
+                    - function.arguments: Partial arguments string
+            mode: The Mode for this parallel operation. Only processes
+                chunks when mode is Mode.PARALLEL_TOOLS.
+
+        Returns:
+            A list of ToolCallDelta objects extracted from this chunk.
+            Returns an empty list if:
+            - mode is not PARALLEL_TOOLS
+            - chunk has no choices
+            - chunk has no tool_calls in delta
+            - tool_calls is empty
+
+        Example:
+            >>> # Simulate an OpenAI streaming chunk
+            >>> chunk = Mock(choices=[
+            ...     Mock(delta=Mock(tool_calls=[
+            ...         Mock(id="call_123", index=0,
+            ...              function=Mock(name="User", arguments='{"name":'))
+            ...     ]))
+            ... ])
+            >>> deltas = OpenAIParallelBase._extract_tool_deltas(
+            ...     chunk, Mode.PARALLEL_TOOLS
+            ... )
+            >>> len(deltas)
+            1
+            >>> deltas[0].id
+            'call_123'
+        """
+        # Only process OpenAI PARALLEL_TOOLS mode
+        if mode != Mode.PARALLEL_TOOLS:
+            return []
+
+        # Validate chunk structure
+        if not chunk or not hasattr(chunk, "choices") or not chunk.choices:
+            return []
+
+        # Get the first choice's delta
+        delta = chunk.choices[0].delta
+        if not delta:
+            return []
+
+        # Check for tool_calls
+        if not hasattr(delta, "tool_calls") or not delta.tool_calls:
+            return []
+
+        # Extract deltas from each tool_call
+        deltas = []
+        for tc in delta.tool_calls:
+            # Safe attribute access with fallbacks
+            tool_call_id = getattr(tc, "id", None)
+            index = getattr(tc, "index", 0)
+
+            # Extract function info if available
+            function = getattr(tc, "function", None)
+            if function:
+                name = getattr(function, "name", None)
+                arguments = getattr(function, "arguments", "") or ""
+            else:
+                name = None
+                arguments = ""
+
+            # Create ToolCallDelta
+            deltas.append(
+                ToolCallDelta(
+                    id=tool_call_id,
+                    index=index,
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+
+        return deltas
+
+
 class AnthropicParallelBase(ParallelBase):
     def from_response(
         self,
@@ -622,3 +738,29 @@ class AnthropicParallelBase(ParallelBase):
 def AnthropicParallelModel(typehint: type[Iterable]) -> AnthropicParallelBase:
     the_types = get_types_array(typehint)
     return AnthropicParallelBase(*[model for model in the_types])
+
+
+def OpenAIParallelModel(typehint: type[Iterable]) -> OpenAIParallelBase:
+    """
+    Create an OpenAI-specific parallel model from a type hint.
+
+    Wraps models from the type hint into an OpenAIParallelBase instance
+    configured for OpenAI's streaming format.
+
+    Args:
+        typehint: A type hint of form Iterable[Union[ModelA, ModelB, ...]]
+
+    Returns:
+        An OpenAIParallelBase instance configured with the extracted models
+
+    Example:
+        >>> from typing import Union
+        >>> from collections.abc import Iterable
+        >>> class User(BaseModel):
+        ...     name: str
+        >>> class Task(BaseModel):
+        ...     title: str
+        >>> parallel = OpenAIParallelModel(Iterable[Union[User, Task]])
+    """
+    the_types = get_types_array(typehint)
+    return OpenAIParallelBase(*[model for model in the_types])

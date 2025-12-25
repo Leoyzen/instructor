@@ -1271,7 +1271,8 @@ class AsyncParallelBase(ParallelBase):
 
     @staticmethod
     def _extract_tool_deltas(
-        chunk: Any, mode: Mode  # noqa: ARG004
+        chunk: Any,
+        mode: Mode,  # noqa: ARG004
     ) -> list[ToolCallDelta]:
         """Extract deltas from mock chunks."""
         if hasattr(chunk, "deltas"):
@@ -2755,6 +2756,968 @@ class TestParallelBaseEdgeCases:
         )
 
         assert len(results) == 1
+
+
+# ============================================================================
+# OpenAI-Specific Integration Tests
+# ============================================================================
+
+
+class MockOpenAIFunction:
+    """Mock OpenAI Function object."""
+
+    def __init__(self, name: Optional[str] = None, arguments: Optional[str] = ""):
+        self.name = name
+        self.arguments = arguments
+
+
+class MockOpenAIToolCall:
+    """Mock OpenAI ToolCall object for streaming."""
+
+    def __init__(
+        self,
+        id: Optional[str] = None,
+        index: int = 0,
+        function: Optional[MockOpenAIFunction] = None,
+    ):
+        self.id = id
+        self.index = index
+        self.function = function or MockOpenAIFunction()
+
+
+class MockOpenAIDelta:
+    """Mock OpenAI ChatCompletionChunk delta."""
+
+    def __init__(self, tool_calls: Optional[list] = None):
+        self.tool_calls = tool_calls
+
+
+class MockOpenAIChoice:
+    """Mock OpenAI Choice object."""
+
+    def __init__(self, delta: Optional[MockOpenAIDelta] = None):
+        self.delta = delta or MockOpenAIDelta()
+
+
+class MockOpenAIChunk:
+    """Mock OpenAI ChatCompletionChunk."""
+
+    def __init__(self, choices: Optional[list] = None):
+        self.choices = choices or []
+
+
+# ============================================================================
+# TestOpenAIParallelBase Tests
+# ============================================================================
+
+
+class TestOpenAIParallelBase:
+    """Test cases for OpenAIParallelBase initialization and attributes."""
+
+    @pytest.fixture
+    def openai_parallel_base(self):
+        """OpenAI ParallelBase fixture."""
+        from instructor.dsl.parallel import OpenAIParallelBase
+
+        return OpenAIParallelBase(TestModel, NestedModel, ComplexModel)
+
+    def test_openai_parallel_base_initialization(self, openai_parallel_base):
+        """Test OpenAI-specific initialization."""
+        assert len(openai_parallel_base.models) == 3
+        assert "TestModel" in openai_parallel_base.registry
+        assert "NestedModel" in openai_parallel_base.registry
+        assert "ComplexModel" in openai_parallel_base.registry
+
+    def test_openai_parallel_base_model_registration(self, openai_parallel_base):
+        """Test model registration in OpenAI ParallelBase."""
+        assert openai_parallel_base.registry["TestModel"] == TestModel
+        assert openai_parallel_base.registry["NestedModel"] == NestedModel
+        assert openai_parallel_base.registry["ComplexModel"] == ComplexModel
+
+    def test_openai_parallel_base_inheritance(self, openai_parallel_base):
+        """Test that OpenAIParallelBase inherits from ParallelBase."""
+        from instructor.dsl.parallel import ParallelBase
+
+        assert isinstance(openai_parallel_base, ParallelBase)
+
+    def test_openai_parallel_base_requires_models(self):
+        """Test that OpenAI ParallelBase requires at least one model."""
+        from instructor.dsl.parallel import OpenAIParallelBase
+
+        with pytest.raises(AssertionError) as exc_info:
+            OpenAIParallelBase()
+        assert "At least one model is required" in str(exc_info.value)
+
+    def test_openai_parallel_base_single_model(self):
+        """Test OpenAIParallelBase with single model."""
+        from instructor.dsl.parallel import OpenAIParallelBase
+
+        parallel_base = OpenAIParallelBase(TestModel)
+        assert len(parallel_base.models) == 1
+        assert "TestModel" in parallel_base.registry
+
+
+# ============================================================================
+# TestOpenAIExtractToolDeltas Tests
+# ============================================================================
+
+
+class TestOpenAIExtractToolDeltas:
+    """Test cases for OpenAI-specific _extract_tool_deltas method."""
+
+    @pytest.fixture
+    def openai_parallel_base(self):
+        """OpenAI ParallelBase fixture."""
+        from instructor.dsl.parallel import OpenAIParallelBase
+
+        return OpenAIParallelBase(TestModel, NestedModel)
+
+    def test_extract_tool_deltas_with_valid_openai_chunk(self, openai_parallel_base):
+        """Test extraction with valid OpenAI chunk containing tool_calls."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id="call_abc123",
+                                index=0,
+                                function=MockOpenAIFunction(
+                                    name="TestModel", arguments='{"name": "Alice"'
+                                ),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 1
+        assert deltas[0].id == "call_abc123"
+        assert deltas[0].index == 0
+        assert deltas[0].name == "TestModel"
+        assert deltas[0].arguments == '{"name": "Alice"'
+
+    def test_extract_tool_deltas_with_multiple_tool_calls(self, openai_parallel_base):
+        """Test extraction with multiple tool calls in single chunk."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id="call_1",
+                                index=0,
+                                function=MockOpenAIFunction(
+                                    name="TestModel", arguments='{"name": "Alice"'
+                                ),
+                            ),
+                            MockOpenAIToolCall(
+                                id="call_2",
+                                index=1,
+                                function=MockOpenAIFunction(
+                                    name="NestedModel", arguments='{"title": "Task"'
+                                ),
+                            ),
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 2
+        assert deltas[0].id == "call_1"
+        assert deltas[0].name == "TestModel"
+        assert deltas[1].id == "call_2"
+        assert deltas[1].name == "NestedModel"
+
+    def test_extract_tool_deltas_with_missing_tool_calls(self, openai_parallel_base):
+        """Test extraction when tool_calls is None."""
+        chunk = MockOpenAIChunk(
+            choices=[MockOpenAIChoice(delta=MockOpenAIDelta(tool_calls=None))]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 0
+
+    def test_extract_tool_deltas_with_missing_choices(self, openai_parallel_base):
+        """Test extraction when choices is missing."""
+        chunk = MockOpenAIChunk(choices=None)
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 0
+
+    def test_extract_tool_deltas_with_missing_delta(self, openai_parallel_base):
+        """Test extraction when delta is missing."""
+        chunk = MockOpenAIChunk(choices=[MockOpenAIChoice(delta=None)])
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 0
+
+    def test_extract_tool_deltas_with_missing_function(self, openai_parallel_base):
+        """Test extraction when function is None."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id="call_123",
+                                index=0,
+                                function=None,
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 1
+        assert deltas[0].id == "call_123"
+        assert deltas[0].name is None
+        assert deltas[0].arguments == ""
+
+    def test_extract_tool_deltas_with_none_values(self, openai_parallel_base):
+        """Test extraction with None values for id and name (early chunks)."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id=None,
+                                index=0,
+                                function=MockOpenAIFunction(
+                                    name=None, arguments='{"name"'
+                                ),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 1
+        assert deltas[0].id is None
+        assert deltas[0].name is None
+        assert deltas[0].arguments == '{"name"'
+
+    def test_extract_tool_deltas_wrong_mode(self, openai_parallel_base):
+        """Test extraction returns empty for non-PARALLEL_TOOLS mode."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id="call_123",
+                                function=MockOpenAIFunction(
+                                    name="TestModel", arguments="{}"
+                                ),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        # Test with MD_JSON mode
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.MD_JSON)
+        assert len(deltas) == 0
+
+    def test_extract_tool_deltas_empty_chunk(self, openai_parallel_base):
+        """Test extraction with completely empty chunk."""
+        chunk = MockOpenAIChunk(choices=[])
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 0
+
+    @pytest.mark.parametrize(
+        "expected_args",
+        [
+            ('{"name": "Alice"'),
+            (', "age": 30}'),
+            ('""'),
+            ("{}"),
+            (""),
+        ],
+    )
+    def test_extract_tool_deltas_various_arguments(
+        self, openai_parallel_base, expected_args
+    ):
+        """Test extraction with various argument strings."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id="call_1",
+                                function=MockOpenAIFunction(
+                                    name="TestModel",
+                                    arguments=expected_args,
+                                ),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 1
+        assert deltas[0].arguments == expected_args
+
+    @pytest.mark.parametrize(
+        "tool_call_id,index,expected_id",
+        [
+            ("call_123", 0, "call_123"),
+            (None, 0, None),
+            ("call_456", 5, "call_456"),
+        ],
+    )
+    def test_extract_tool_deltas_various_ids(
+        self, openai_parallel_base, tool_call_id, index, expected_id
+    ):
+        """Test extraction with various id values."""
+        chunk = MockOpenAIChunk(
+            choices=[
+                MockOpenAIChoice(
+                    delta=MockOpenAIDelta(
+                        tool_calls=[
+                            MockOpenAIToolCall(
+                                id=tool_call_id,
+                                index=index,
+                                function=MockOpenAIFunction(
+                                    name="TestModel", arguments="{}"
+                                ),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        deltas = openai_parallel_base._extract_tool_deltas(chunk, Mode.PARALLEL_TOOLS)
+
+        assert len(deltas) == 1
+        assert deltas[0].id == expected_id
+        assert deltas[0].index == index
+
+
+# ============================================================================
+# TestOpenAIStreamingIntegration Tests
+# ============================================================================
+
+
+class TestOpenAIStreamingIntegration:
+    """Integration tests for OpenAI streaming with real-world scenarios."""
+
+    @pytest.fixture
+    def openai_parallel_base(self):
+        """OpenAI ParallelBase fixture."""
+        from instructor.dsl.parallel import OpenAIParallelBase
+
+        return OpenAIParallelBase(TestModel, NestedModel, ComplexModel)
+
+    def test_openai_streaming_single_tool_call(self, openai_parallel_base):
+        """Test streaming with single complete tool call."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice", "age": 30}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        assert len(results) == 1
+        assert "call_1" in results[0].partial
+        model = results[0].partial["call_1"]
+        assert model.name == "Alice"
+        assert model.age == 30
+
+    def test_openai_streaming_multiple_tool_calls(self, openai_parallel_base):
+        """Test streaming with multiple complete tool calls."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice", "age": 30}',
+                                    ),
+                                ),
+                                MockOpenAIToolCall(
+                                    id="call_2",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments='{"title": "Task 1", "description": "A valid description"}',
+                                    ),
+                                ),
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        # Each tool_call in a chunk generates a separate ParallelResult
+        assert len(results) == 2
+        # First result has call_1
+        assert "call_1" in results[0].partial
+        # Second result has both calls (accumulated)
+        assert "call_1" in results[1].partial
+        assert "call_2" in results[1].partial
+
+    def test_openai_streaming_partial_json(self, openai_parallel_base):
+        """Test streaming with partial JSON across multiple chunks."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"n',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='ame": "Alice"',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments=', "age": 3',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments="0}",
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        assert len(results) == 4
+        # Final result should have complete model
+        final_result = results[-1]
+        assert "call_1" in final_result.partial
+        model = final_result.partial["call_1"]
+        assert model.name == "Alice"
+        assert model.age == 30
+
+    def test_openai_streaming_complete_json(self, openai_parallel_base):
+        """Test streaming with complete JSON in single chunk."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_complete",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Bob", "age": 25, "email": "bob@example.com"}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        assert len(results) == 1
+        assert "call_complete" in results[0].partial
+        model = results[0].partial["call_complete"]
+        assert model.name == "Bob"
+        assert model.age == 25
+        assert model.email == "bob@example.com"
+
+    def test_openai_streaming_mixed_complete_partial(self, openai_parallel_base):
+        """Test streaming with mix of complete and partial models."""
+        chunks = [
+            # First call - complete early
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_complete",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Complete", "age": 100}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            # Second call - partial
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_partial",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments='{"title": "Partial"',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_partial",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments=', "description": "In progress"}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        # Should have 3 results (first chunk, second chunk, third chunk)
+        assert len(results) >= 2
+        final_result = results[-1]
+        # Should have both calls tracked
+        assert len(final_result.partial) >= 1
+
+    @pytest.mark.asyncio
+    async def test_openai_streaming_async_single_tool_call(self, openai_parallel_base):
+        """Test async streaming with single complete tool call."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice", "age": 30}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        results = []
+        async for result in openai_parallel_base.from_streaming_response_async(
+            MockAsyncStreamingGenerator(chunks), Mode.PARALLEL_TOOLS
+        ):
+            results.append(result)
+
+        assert len(results) == 1
+        assert "call_1" in results[0].partial
+        model = results[0].partial["call_1"]
+        assert model.name == "Alice"
+        assert model.age == 30
+
+    @pytest.mark.asyncio
+    async def test_openai_streaming_async_multiple_calls(self, openai_parallel_base):
+        """Test async streaming with multiple concurrent tool calls."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice"',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_2",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments='{"title": "Task"',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments=', "age": 30}',
+                                    ),
+                                ),
+                                MockOpenAIToolCall(
+                                    id="call_2",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments=', "description": "Valid desc"}',
+                                    ),
+                                ),
+                            ]
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        results = []
+        async for result in openai_parallel_base.from_streaming_response_async(
+            MockAsyncStreamingGenerator(chunks), Mode.PARALLEL_TOOLS
+        ):
+            results.append(result)
+
+        # Chunk 1: call_1 (partial, yields result)
+        # Chunk 2: call_2 (partial, yields result)
+        # Chunk 3: call_1 update (yields result) + call_2 update (yields result)
+        assert len(results) == 4
+        final_result = results[-1]
+        assert len(final_result.partial) == 2
+        assert "call_1" in final_result.partial
+        assert "call_2" in final_result.partial
+
+    @pytest.mark.parametrize(
+        "json_string",
+        [
+            '{"name": "Alice", "age": 30}',
+            '{"title": "Task", "description": "Description"}',
+            '{"number": 42, "text": "Hello", "optional_text": null}',
+        ],
+    )
+    def test_openai_streaming_various_model_types(
+        self, openai_parallel_base, json_string
+    ):
+        """Test streaming with various valid JSON structures."""
+        import json
+
+        data = json.loads(json_string)
+
+        if "age" in data:
+            model_name = "TestModel"
+        elif "title" in data:
+            model_name = "NestedModel"
+        else:
+            model_name = "ComplexModel"
+
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name=model_name,
+                                        arguments=json_string,
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        assert len(results) == 1
+        assert "call_1" in results[0].partial
+
+    def test_openai_streaming_validation_context(self, openai_parallel_base):
+        """Test streaming with validation context."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice", "age": 30}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        validation_context = {"user_id": "123", "request_id": "abc"}
+        results = list(
+            openai_parallel_base.from_streaming_response(
+                chunks, Mode.PARALLEL_TOOLS, validation_context=validation_context
+            )
+        )
+
+        assert len(results) == 1
+        assert "call_1" in results[0].partial
+
+    def test_openai_streaming_strict_mode(self, openai_parallel_base):
+        """Test streaming with strict mode."""
+        chunks = [
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"name": "Alice", "age": 30}',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+        ]
+
+        # Test with strict=False
+        results = list(
+            openai_parallel_base.from_streaming_response(
+                chunks, Mode.PARALLEL_TOOLS, strict=False
+            )
+        )
+
+        assert len(results) == 1
+
+    def test_openai_streaming_interleaved_chunks(self, openai_parallel_base):
+        """Test streaming with interleaved chunks for different calls."""
+        chunks = [
+            # First call partial
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='{"n',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            # Second call partial
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_2",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments='{"ti',
+                                    ),
+                                )
+                            ]
+                        )
+                    )
+                ]
+            ),
+            # Both calls complete
+            MockOpenAIChunk(
+                choices=[
+                    MockOpenAIChoice(
+                        delta=MockOpenAIDelta(
+                            tool_calls=[
+                                MockOpenAIToolCall(
+                                    id="call_1",
+                                    index=0,
+                                    function=MockOpenAIFunction(
+                                        name="TestModel",
+                                        arguments='ame": "Alice", "age": 30}',
+                                    ),
+                                ),
+                                MockOpenAIToolCall(
+                                    id="call_2",
+                                    index=1,
+                                    function=MockOpenAIFunction(
+                                        name="NestedModel",
+                                        arguments='tle": "Task", "description": "Valid desc"}',
+                                    ),
+                                ),
+                            ]
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        results = list(
+            openai_parallel_base.from_streaming_response(chunks, Mode.PARALLEL_TOOLS)
+        )
+
+        # Chunk 1: call_1 (1 result)
+        # Chunk 2: call_2 (1 result)
+        # Chunk 3: call_1 update + call_2 update (2 results)
+        assert len(results) == 4
+        final_result = results[-1]
+        assert len(final_result.partial) == 2
 
     @pytest.mark.asyncio
     async def test_edge_case_async_unicode_json(self):
