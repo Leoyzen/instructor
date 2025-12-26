@@ -460,52 +460,70 @@ def handle_response_model(
 
         if is_streaming:
             # For streaming, ensure response_model is a ParallelBase instance
-            from ..dsl.parallel import ParallelBase
+            from ..dsl.parallel import ParallelBase, is_union_type
 
             if not isinstance(response_model, ParallelBase):
-                # Check if it's Iterable[Union[...]] type
+                # Check if it's Iterable[Union[...]] type (parallel mode)
+                # vs Iterable[Model] (iterable mode - should NOT be converted to ParallelBase)
                 is_iterable_type = isinstance(
                     response_model, GenericAlias
                 ) and issubclass(get_origin(response_model), Iterable)
 
                 if is_iterable_type:
-                    # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
-                    from ..dsl.parallel import (
-                        AnthropicParallelModel,
-                        LiteLLMParallelModel,
-                        VertexAIParallelModel,
-                    )
+                    # Only convert to ParallelBase if Iterable[Union[...]] (parallel mode)
+                    # For Iterable[Model] (single type), should use IterableBase instead
+                    if is_union_type(response_model):
+                        # This is a parallel mode: Iterable[Union[ModelA, ModelB, ...]]
+                        # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
+                        from ..dsl.parallel import (
+                            AnthropicParallelModel,
+                            LiteLLMParallelModel,
+                            VertexAIParallelModel,
+                        )
 
-                    # Create appropriate ParallelBase instance based on mode
-                    if mode == Mode.PARALLEL_TOOLS:
-                        # Use LiteLLMParallelModel for PARALLEL_TOOLS mode (supports LiteLLM's unified interface)
-                        # OpenAIParallelModel is also compatible but LiteLLMParallelModel is optimized for LiteLLM
-                        response_model = LiteLLMParallelModel(response_model)  # type: ignore[arg-type]
-                    elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
-                        response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
-                    elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
-                        response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
-                    # Other providers can be added here in future
+                        # Create appropriate ParallelBase instance based on mode
+                        if mode == Mode.PARALLEL_TOOLS:
+                            # Use LiteLLMParallelModel for PARALLEL_TOOLS mode
+                            response_model = LiteLLMParallelModel(response_model)  # type: ignore[arg-type]
+                        elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
+                            response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
+                        elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
+                            response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
+                        # Other providers can be added here in future
+                    else:
+                        # This is an iterable mode: Iterable[Model] (single type)
+                        # Should NOT be converted to ParallelBase - will be handled by IterableBase
+                        # Skip parallel mode handling entirely by falling through to regular mode handlers
+                        logger.debug(
+                            f"Detected Iterable[Model] (single type), treating as iterable mode, not parallel mode"
+                        )
+                        # Skip parallel mode processing and let it fall through to regular handlers below
+                        mode = None  # Clear mode to fall through to general handlers
+                        # Keep stream=True in kwargs for IterableBase processing
                 else:
                     # Already a ParallelBase instance
                     logger.debug(
                         f"response_model is already ParallelBase: {response_model}"
                     )
+            else:
+                # No parallel handling needed when not streaming
+                mode = None  # Clear mode to fall through to general handlers
 
-            # For streaming mode, only process kwargs to set up tools/tool_choice
-            # response_model is already a ParallelBase instance (either user-provided or auto-created)
+        # For streaming mode, only process kwargs to set up tools/tool_choice
+        # response_model is already a ParallelBase instance (either user-provided or auto-created)
+        if mode in PARALLEL_MODES and new_kwargs.get("stream", False):
             response_model_for_kwargs = response_model if isinstance(response_model, ParallelBase) else None
             # Pass the response_model (either ParallelBase instance or None) to the handler
             # The handler will extract tools from ParallelBase instances if needed
             _, new_kwargs = PARALLEL_MODES[mode](response_model_for_kwargs, new_kwargs)  # type: ignore[arg-type,return-value]
-        else:
-            # Non-streaming mode: use original logic
+        elif mode in PARALLEL_MODES:
+            # Non-streaming parallel mode: use original logic
             response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore[arg-type,return-value]
 
         logger.debug(
-            f"Instructor Request: {mode.value=}, {response_model=}, {new_kwargs=}",
+            f"Instructor Request: {mode.value if mode is not None else 'None'}, {response_model=}, {new_kwargs=}",
             extra={
-                "mode": mode.value,
+                "mode": mode.value if mode is not None else "None",
                 "response_model": (
                     response_model.__name__
                     if response_model is not None
