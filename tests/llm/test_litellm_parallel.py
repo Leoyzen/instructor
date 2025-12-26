@@ -88,6 +88,37 @@ def test_lite_llm_parallel_model_creation():
     assert "Task" in parallel_base.registry
 
 
+def test_handle_response_model_with_typing_iterable():
+    """Test that handle_response_model works with typing.Iterable (recommended import).
+    
+    This test ensures compatibility with the recommended Python 3.9+ way of importing Iterable.
+    Previously, the code only worked with collections.abc.Iterable due to using
+    'is' identity check instead of comparing by name.
+    """
+    from instructor.processing.response import handle_response_model
+
+    # Use typing.Iterable (the recommended way in Python 3.9+)
+    response_model = Iterable[Union[User, Task]]
+    new_kwargs = {
+        "model": "gpt-4",
+        "stream": True,
+    }
+    
+    # This should NOT raise TypeError
+    processed_model, processed_kwargs = handle_response_model(
+        response_model=response_model,
+        mode=instructor.Mode.PARALLEL_TOOLS,
+        **new_kwargs,
+    )
+    
+    # Verify that tools were set up correctly
+    assert "tools" in processed_kwargs
+    assert processed_kwargs["tool_choice"] == "auto"
+    
+    # Verify that response_model was converted to ParallelBase
+    assert isinstance(processed_model, LiteLLMParallelBase)
+
+
 def test_lite_llm_parallel_model_single_type():
     """Test LiteLLMParallelModel with a single type (non-Union)."""
     parallel_base = LiteLLMParallelModel(Iterable[User])

@@ -548,7 +548,23 @@ else:
 def get_types_array(typehint: type[Iterable]) -> tuple[type[T], ...]:
     should_be_iterable = get_origin(typehint)
 
-    if should_be_iterable is not ABCIterable:
+    # Check if it's an Iterable type using issubclass
+    # This supports both typing.Iterable and collections.abc.Iterable
+    # In Python 3.9+, typing.Iterable is an alias for collections.abc.Iterable
+    # but they are different objects, so we check using issubclass
+    if should_be_iterable is None:
+        raise TypeError(f"Model should be with Iterable instead of {typehint}")
+
+    # For typing.Iterable: check __origin__ attribute
+    # For collections.abc.Iterable: use directly
+    # We need to distinguish Iterable[Type] from concrete types like list
+    origin_to_check = getattr(should_be_iterable, "__origin__", should_be_iterable)
+    
+    # Check if it's exactly Iterable (either typing or collections.abc)
+    # We use __name__ to distinguish from concrete types like list, set, etc.
+    # typing.Iterable has __origin__ pointing to collections.abc.Iterable
+    # collections.abc.Iterable has __name__ == "Iterable"
+    if getattr(origin_to_check, "__name__", "") != "Iterable":
         raise TypeError(f"Model should be with Iterable instead of {typehint}")
 
     if is_union_type(typehint):
