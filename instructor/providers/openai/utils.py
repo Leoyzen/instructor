@@ -166,7 +166,28 @@ def handle_parallel_tools(
     Note:
         When stream=True, the response will be a generator yielding ParallelResult
         objects containing partial and completed models for each parallel tool call.
+    
+    Note for streaming:
+        When stream=True, response_model may be a ParallelBase instance (e.g., LiteLLMParallelBase).
+        In this case, we extract the tools directly from the instance's models.
     """
+    from ...dsl.parallel import ParallelBase
+
+    # Handle ParallelBase instances (streaming case)
+    if isinstance(response_model, ParallelBase):
+        # For ParallelBase instances, we already have the models
+        # Generate tools directly from the instance's registry
+        from ...processing.function_calls import openai_schema
+        
+        tools = [
+            {"type": "function", "function": openai_schema(model).openai_schema}
+            for model in response_model.models
+        ]
+        new_kwargs["tools"] = tools
+        new_kwargs["tool_choice"] = "auto"
+        return cast(type[Any], response_model), new_kwargs
+    
+    # Original logic for type hints
     new_kwargs["tools"] = handle_parallel_model(response_model)
     new_kwargs["tool_choice"] = "auto"
     return cast(type[Any], ParallelModel(typehint=response_model)), new_kwargs

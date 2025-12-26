@@ -38,6 +38,7 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import AsyncGenerator, Iterable
+from types import GenericAlias
 from typing import TYPE_CHECKING, Any, TypeVar, cast, get_origin
 
 from openai.types.chat import ChatCompletion
@@ -463,10 +464,9 @@ def handle_response_model(
 
             if not isinstance(response_model, ParallelBase):
                 # Check if it's Iterable[Union[...]] type
-                is_iterable_type = (
-                    isinstance(response_model, type)
-                    and get_origin(response_model) is Iterable
-                )
+                is_iterable_type = isinstance(
+                    response_model, GenericAlias
+                ) and issubclass(get_origin(response_model), Iterable)
 
                 if is_iterable_type:
                     # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
@@ -486,10 +486,17 @@ def handle_response_model(
                     elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
                         response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
                     # Other providers can be added here in future
+                else:
+                    # Already a ParallelBase instance
+                    logger.debug(
+                        f"response_model is already ParallelBase: {response_model}"
+                    )
 
             # For streaming mode, only process kwargs to set up tools/tool_choice
             # response_model is already a ParallelBase instance (either user-provided or auto-created)
             response_model_for_kwargs = response_model if isinstance(response_model, ParallelBase) else None
+            # Pass the response_model (either ParallelBase instance or None) to the handler
+            # The handler will extract tools from ParallelBase instances if needed
             _, new_kwargs = PARALLEL_MODES[mode](response_model_for_kwargs, new_kwargs)  # type: ignore[arg-type,return-value]
         else:
             # Non-streaming mode: use original logic
