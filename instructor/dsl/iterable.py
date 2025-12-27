@@ -1,16 +1,18 @@
+import json
 from collections.abc import AsyncGenerator, Generator, Iterable
 from typing import (
+    TYPE_CHECKING,
     Any,
     ClassVar,
     Optional,
-    cast,
-    get_origin,
-    get_args,
     Union,
-    TYPE_CHECKING,
+    cast,
+    get_args,
+    get_origin,
 )
-import json
+
 from pydantic import BaseModel, Field, create_model
+
 from ..mode import Mode
 from ..utils import extract_json_from_stream, extract_json_from_stream_async
 
@@ -148,6 +150,41 @@ class IterableBase:
     def extract_json(
         completion: Iterable[Any], mode: Mode
     ) -> Generator[str, None, None]:
+        # Validate that mode is supported for streaming
+        SUPPORTED_STREAMING_MODES = {
+            Mode.ANTHROPIC_JSON,
+            Mode.ANTHROPIC_TOOLS,
+            Mode.GEMINI_JSON,
+            Mode.VERTEXAI_JSON,
+            Mode.VERTEXAI_TOOLS,
+            Mode.MISTRAL_STRUCTURED_OUTPUTS,
+            Mode.MISTRAL_TOOLS,
+            Mode.GENAI_TOOLS,
+            Mode.GENAI_STRUCTURED_OUTPUTS,
+            Mode.GEMINI_TOOLS,
+            Mode.RESPONSES_TOOLS,
+            Mode.RESPONSES_TOOLS_WITH_INBUILT_TOOLS,
+            Mode.FUNCTIONS,
+            Mode.JSON,
+            Mode.MD_JSON,
+            Mode.JSON_SCHEMA,
+            Mode.CEREBRAS_JSON,
+            Mode.FIREWORKS_JSON,
+            Mode.PERPLEXITY_JSON,
+            Mode.WRITER_JSON,
+            Mode.TOOLS,
+            Mode.TOOLS_STRICT,
+            Mode.PARALLEL_TOOLS,
+            Mode.FIREWORKS_TOOLS,
+            Mode.WRITER_TOOLS,
+        }
+
+        if mode not in SUPPORTED_STREAMING_MODES:
+            raise NotImplementedError(
+                f"Mode {mode} is not supported for MultiTask streaming. "
+                f"Supported modes for streaming are: {', '.join(str(m) for m in SUPPORTED_STREAMING_MODES)}"
+            )
+
         for chunk in completion:
             try:
                 if mode == Mode.ANTHROPIC_JSON:
@@ -213,6 +250,7 @@ class IterableBase:
                     elif mode in {
                         Mode.TOOLS,
                         Mode.TOOLS_STRICT,
+                        Mode.PARALLEL_TOOLS,
                         Mode.FIREWORKS_TOOLS,
                         Mode.WRITER_TOOLS,
                     }:
@@ -284,6 +322,7 @@ class IterableBase:
                     elif mode in {
                         Mode.TOOLS,
                         Mode.TOOLS_STRICT,
+                        Mode.PARALLEL_TOOLS,
                         Mode.FIREWORKS_TOOLS,
                         Mode.WRITER_TOOLS,
                     }:

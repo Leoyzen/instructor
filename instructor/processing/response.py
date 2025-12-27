@@ -232,6 +232,43 @@ async def process_response_async(
     if response_model is None:
         return response
 
+    # Handle Iterable[Model] types (streaming mode)
+    # This is needed when prepare_response_model() didn't convert it to IterableModel
+    # which can happen in certain code paths
+    if (
+        stream
+        and isinstance(response_model, GenericAlias)
+        and get_origin(response_model) is Iterable
+    ):
+        element_type = get_args(response_model)[0] if get_args(response_model) else None
+
+        # Only convert if it's Iterable[Model] (single type), not Iterable[Union[...]]
+        # Iterable[Union[...]] is for parallel mode and should be handled by ParallelBase
+        from typing import Union
+
+        if element_type and not (
+            hasattr(element_type, "__origin__") and get_origin(element_type) is Union
+        ):
+            from ..dsl.iterable import IterableModel
+
+            # Create IterableModel class dynamically
+            response_model = IterableModel(subtask_class=element_type)
+            logger.debug(
+                f"Auto-converted Iterable[Model] to IterableModel for streaming"
+            )
+
+            # IterableModel doesn't support parallel modes (PARALLEL_TOOLS, etc.)
+            # Switch to a supported mode (TOOLS) when in parallel mode
+            if mode in {
+                Mode.PARALLEL_TOOLS,
+                Mode.VERTEXAI_PARALLEL_TOOLS,
+                Mode.ANTHROPIC_PARALLEL_TOOLS,
+            }:
+                logger.debug(
+                    f"Switching from {mode} to Mode.TOOLS for Iterable[Model] streaming"
+                )
+                mode = Mode.TOOLS
+
     if (
         inspect.isclass(response_model)
         and issubclass(response_model, (IterableBase, PartialBase))
@@ -353,6 +390,39 @@ def process_response(
         logger.debug("No response model, returning response as is")
         return response
 
+    # Handle Iterable[Model] types (streaming mode)
+    # Convert Iterable[Model] to IterableModel for all cases
+    # This needs to be done BEFORE the IterableBase/ParallelBase/PartialBase checks below
+    if isinstance(response_model, GenericAlias):
+        element_type = get_args(response_model)[0] if get_args(response_model) else None
+
+        # Only convert if it's Iterable[Model] (single type), not Iterable[Union[...]]
+        # Iterable[Union[...]] is for parallel mode and should be handled by ParallelBase
+        from typing import Union
+
+        if element_type and not (
+            hasattr(element_type, "__origin__") and get_origin(element_type) is Union
+        ):
+            from ..dsl.iterable import IterableModel
+
+            # Create IterableModel class dynamically
+            response_model = IterableModel(subtask_class=element_type)
+            logger.debug(
+                f"Auto-converted Iterable[Model] to IterableModel for streaming"
+            )
+
+            # IterableModel doesn't support parallel modes (PARALLEL_TOOLS, etc.)
+            # Switch to a supported mode (TOOLS) when in parallel mode
+            if mode in {
+                Mode.PARALLEL_TOOLS,
+                Mode.VERTEXAI_PARALLEL_TOOLS,
+                Mode.ANTHROPIC_PARALLEL_TOOLS,
+            }:
+                logger.debug(
+                    f"Switching from {mode} to Mode.TOOLS for Iterable[Model] streaming"
+                )
+                mode = Mode.TOOLS
+
     if (
         inspect.isclass(response_model)
         and issubclass(response_model, (IterableBase, PartialBase))
@@ -413,7 +483,7 @@ def is_typed_dict(cls) -> bool:
 
 def handle_response_model(
     response_model: type[T] | None, mode: Mode = Mode.TOOLS, **kwargs: Any
-) -> tuple[type[T] | None, dict[str, Any]]:
+) -> tuple[type[T] | None, dict[str, Any], Mode | None]:
     """
     Handles the response model based on the specified mode and prepares the kwargs for the API call.
 
@@ -459,63 +529,100 @@ def handle_response_model(
         is_streaming = new_kwargs.get("stream", False)
 
         if is_streaming:
-            # For streaming, ensure response_model is a ParallelBase instance
-            from ..dsl.parallel import ParallelBase, is_union_type
-
-            if not isinstance(response_model, ParallelBase):
-                # Check if it's Iterable[Union[...]] type (parallel mode)
-                # vs Iterable[Model] (iterable mode - should NOT be converted to ParallelBase)
-                is_iterable_type = isinstance(
-                    response_model, GenericAlias
-                ) and issubclass(get_origin(response_model), Iterable)
-
-                if is_iterable_type:
-                    # Only convert to ParallelBase if Iterable[Union[...]] (parallel mode)
-                    # For Iterable[Model] (single type), should use IterableBase instead
-                    if is_union_type(response_model):
-                        # This is a parallel mode: Iterable[Union[ModelA, ModelB, ...]]
-                        # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
-                        from ..dsl.parallel import (
-                            AnthropicParallelModel,
-                            LiteLLMParallelModel,
-                            VertexAIParallelModel,
-                        )
-
-                        # Create appropriate ParallelBase instance based on mode
-                        if mode == Mode.PARALLEL_TOOLS:
-                            # Use LiteLLMParallelModel for PARALLEL_TOOLS mode
-                            response_model = LiteLLMParallelModel(response_model)  # type: ignore[arg-type]
-                        elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
-                            response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
-                        elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
-                            response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
-                        # Other providers can be added here in future
-                    else:
-                        # This is an iterable mode: Iterable[Model] (single type)
-                        # Should NOT be converted to ParallelBase - will be handled by IterableBase
-                        # Skip parallel mode handling entirely by falling through to regular mode handlers
-                        logger.debug(
-                            f"Detected Iterable[Model] (single type), treating as iterable mode, not parallel mode"
-                        )
-                        # Skip parallel mode processing and let it fall through to regular handlers below
-                        mode = None  # Clear mode to fall through to general handlers
-                        # Keep stream=True in kwargs for IterableBase processing
-                else:
-                    # Already a ParallelBase instance
-                    logger.debug(
-                        f"response_model is already ParallelBase: {response_model}"
-                    )
+            # Early check: If response_model is already IterableBase subclass or ParallelBase, skip processing
+            # This prevents errors when response_model was already processed by prepare_response_model()
+            if isinstance(response_model, type) and issubclass(
+                response_model, IterableBase
+            ):
+                logger.debug(
+                    f"response_model is already an IterableBase subclass, skipping parallel mode processing"
+                )
+                response_model_for_kwargs = response_model
+            elif isinstance(response_model, ParallelBase):
+                logger.debug(
+                    f"response_model is already a ParallelBase instance, skipping parallel mode processing"
+                )
+                response_model_for_kwargs = response_model
             else:
-                # No parallel handling needed when not streaming
-                mode = None  # Clear mode to fall through to general handlers
+                # For streaming, ensure response_model is a ParallelBase instance
+                from ..dsl.parallel import is_union_type
 
+                if not isinstance(response_model, ParallelBase):
+                    # Check if it's Iterable[Union[...]] type (parallel mode)
+                    # vs Iterable[Model] (iterable mode - should NOT be converted to ParallelBase)
+                    is_iterable_type = isinstance(
+                        response_model, GenericAlias
+                    ) and issubclass(get_origin(response_model), Iterable)
+
+                    if is_iterable_type:
+                        # Only convert to ParallelBase if Iterable[Union[...]] (parallel mode)
+                        # For Iterable[Model] (single type), should use IterableBase instead
+                        if is_union_type(response_model):
+                            # This is a parallel mode: Iterable[Union[ModelA, ModelB, ...]]
+                            # Import provider-specific ParallelBase subclasses at runtime to avoid circular imports
+                            from ..dsl.parallel import (
+                                AnthropicParallelModel,
+                                LiteLLMParallelModel,
+                                VertexAIParallelModel,
+                            )
+
+                            # Create appropriate ParallelBase instance based on mode
+                            if mode == Mode.PARALLEL_TOOLS:
+                                # Use LiteLLMParallelModel for PARALLEL_TOOLS mode
+                                response_model = LiteLLMParallelModel(response_model)  # type: ignore[arg-type]
+                            elif mode == Mode.VERTEXAI_PARALLEL_TOOLS:
+                                response_model = VertexAIParallelModel(response_model)  # type: ignore[arg-type]
+                            elif mode == Mode.ANTHROPIC_PARALLEL_TOOLS:
+                                response_model = AnthropicParallelModel(response_model)  # type: ignore[arg-type]
+                            # Other providers can be added here in future
+                        else:
+                            # This is an iterable mode: Iterable[Model] (single type)
+                            # Should NOT be converted to ParallelBase - will be handled by IterableBase
+                            # Skip parallel mode handling by falling through to regular mode handlers
+                            logger.debug(
+                                f"Detected Iterable[Model] (single type), treating as iterable mode, not parallel mode"
+                            )
+                            # Skip parallel mode processing and let it fall through to regular handlers below
+                            # Switch to TOOLS mode since IterableModel doesn't support PARALLEL_TOOLS
+                            # This is needed because IterableModel.from_streaming_response() only supports certain modes
+                            mode = Mode.TOOLS
+                            # Keep stream=True in kwargs for IterableBase processing
+                            # Process response_model to convert Iterable[Model] to IterableModel
+                            response_model = prepare_response_model(response_model)
+                            # Return immediately to avoid falling through to the else block
+                            return response_model, new_kwargs, mode
+                    else:
+                        # Neither Iterable[...] nor ParallelBase
+                        # This is an invalid configuration: PARALLEL_TOOLS mode with stream=True
+                        # requires a ParallelBase instance or Iterable[Union[...]]
+                        raise ConfigurationError(
+                            f"Cannot use {mode} mode with stream=True for response_model type {response_model}. "
+                            f"stream=True with parallel modes requires one of: "
+                            f"1. Iterable[Union[Model1, Model2, ...]] (for parallel tool calls), "
+                            f"2. A ParallelBase instance (already created), "
+                            f"3. Iterable[Model] (for single-type streaming, mode will auto-switch to TOOLS). "
+                            f"Use stream=False for regular models with parallel mode, or switch to Mode.TOOLS mode."
+                        )
         # For streaming mode, only process kwargs to set up tools/tool_choice
         # response_model is already a ParallelBase instance (either user-provided or auto-created)
         if mode in PARALLEL_MODES and new_kwargs.get("stream", False):
-            response_model_for_kwargs = response_model if isinstance(response_model, ParallelBase) else None
-            # Pass the response_model (either ParallelBase instance or None) to the handler
-            # The handler will extract tools from ParallelBase instances if needed
-            _, new_kwargs = PARALLEL_MODES[mode](response_model_for_kwargs, new_kwargs)  # type: ignore[arg-type,return-value]
+            # Only call parallel handler if response_model is a ParallelBase instance
+            # For non-ParallelBase types with stream=True, stream is ignored in parallel mode
+            if isinstance(response_model, ParallelBase):
+                _, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore[arg-type,return-value]
+            elif isinstance(response_model, type) and issubclass(
+                response_model, IterableBase
+            ):
+                # IterableBase was already prepared, skip parallel handler
+                pass
+            else:
+                # Non-ParallelBase type: use parallel mode but ignore stream=True
+                # This handles regular models with PARALLEL_TOOLS mode
+                response_model, new_kwargs = PARALLEL_MODES[mode](
+                    response_model, new_kwargs
+                )  # type: ignore[arg-type,return-value]
+                # Remove stream=True as it's not supported for non-ParallelBase types in parallel mode
+                new_kwargs["stream"] = False
         elif mode in PARALLEL_MODES:
             # Non-streaming parallel mode: use original logic
             response_model, new_kwargs = PARALLEL_MODES[mode](response_model, new_kwargs)  # type: ignore[arg-type,return-value]
@@ -533,11 +640,21 @@ def handle_response_model(
                 "new_kwargs": new_kwargs,
             },
         )
-        return response_model, new_kwargs
+        # Return the (possibly modified) mode so callers can use it
+        return response_model, new_kwargs, mode
 
     # Only prepare response_model if it's not None
     if response_model is not None:
         response_model = prepare_response_model(response_model)
+
+    # If mode is None and response_model has been prepared (e.g., converted to IterableModel),
+    # don't continue to mode_handlers - just return directly
+    # This happens when Iterable[Model] is detected in parallel mode
+    if mode is None:
+        logger.debug(
+            f"Mode is None and response_model was prepped, returning without further processing"
+        )
+        return response_model, new_kwargs, mode
 
     mode_handlers = {  # type: ignore
         Mode.FUNCTIONS: handle_functions,
@@ -607,7 +724,8 @@ def handle_response_model(
             "new_kwargs": new_kwargs,
         },
     )
-    return response_model, new_kwargs
+    # Return the (possibly modified) mode so callers can use it
+    return response_model, new_kwargs, mode
 
 
 def handle_reask_kwargs(

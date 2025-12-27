@@ -166,12 +166,15 @@ def patch(  # type: ignore
 
         context = handle_context(context, validation_context)
 
-        response_model, new_kwargs = handle_response_model(
-            response_model=response_model, mode=mode, **kwargs
+        # Get the initial mode from outer scope
+        current_mode = mode
+        response_model, new_kwargs, mode = handle_response_model(
+            response_model=response_model, mode=current_mode, **kwargs
         )  # type: ignore
         new_kwargs = handle_templating(new_kwargs, mode=mode, context=context)
-
+    
         # Attempt cache lookup **before** hitting retry layer
+        # Use the returned mode (which may be modified by handle_response_model)
         if cache is not None and response_model is not None:
             key = make_cache_key(
                 messages=new_kwargs.get("messages")
@@ -179,7 +182,7 @@ def patch(  # type: ignore
                 or new_kwargs.get("chat_history"),
                 model=new_kwargs.get("model"),
                 response_model=response_model,
-                mode=mode.value if hasattr(mode, "value") else str(mode),
+                mode=mode.value if mode is not None and hasattr(mode, "value") else str(mode) if mode is not None else "None",
             )
             obj = load_cached_response(cache, key, response_model)
             if obj is not None:
@@ -235,13 +238,16 @@ def patch(  # type: ignore
 
         context = handle_context(context, validation_context)
         # print(f"instructor.patch: patched_function {func.__name__}")
-        response_model, new_kwargs = handle_response_model(
-            response_model=response_model, mode=mode, **kwargs
+        # Get the initial mode from outer scope
+        current_mode = mode
+        response_model, new_kwargs, mode = handle_response_model(
+            response_model=response_model, mode=current_mode, **kwargs
         )  # type: ignore
 
         new_kwargs = handle_templating(new_kwargs, mode=mode, context=context)
 
         # Attempt cache lookup
+        # Use to returned mode (which may be modified by handle_response_model)
         if cache is not None and response_model is not None:
             key = make_cache_key(
                 messages=new_kwargs.get("messages")
@@ -249,7 +255,7 @@ def patch(  # type: ignore
                 or new_kwargs.get("chat_history"),
                 model=new_kwargs.get("model"),
                 response_model=response_model,
-                mode=mode.value if hasattr(mode, "value") else str(mode),
+                mode=mode.value if mode is not None and hasattr(mode, "value") else None if mode is None else str(mode),
             )
             obj = load_cached_response(cache, key, response_model)
             if obj is not None:
